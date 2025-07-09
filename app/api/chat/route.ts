@@ -2,23 +2,24 @@ import type { NextRequest } from "next/server"
 import { streamText } from "ai"
 import { google } from "@ai-sdk/google"
 import { searchSimilarChunks, saveChatMessage } from "@/lib/database"
+import { AI_MODELS } from "@/lib/constants"
 
-export const maxDuration = 30
+// Maximum duration in seconds for this API route
+export const maxDuration = 30 // Static value required by Next.js
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages } = await req.json()
+    const { sessionId, messages } = await req.json()
     const lastMessage = messages[messages.length - 1]
 
-    console.log(`Processing chat request: "${lastMessage.content.substring(0, 100)}..."`)
+    console.log(`Processing chat request for session ${sessionId}: "${lastMessage.content.substring(0, 100)}..."`)
 
     // Search for relevant document chunks using Ollama embeddings
-    const relevantChunks = await searchSimilarChunks(lastMessage.content, 5)
+    const relevantChunks = await searchSimilarChunks(lastMessage.content, 59)
 
     // Build enhanced context with file information
     let context = ""
     if (relevantChunks.length > 0) {
-      // Group chunks by file for better organization
       const chunksByFile = relevantChunks.reduce(
         (acc, chunk) => {
           if (!acc[chunk.fileName]) {
@@ -46,7 +47,6 @@ export async function POST(req: NextRequest) {
       console.log("No relevant chunks found for the query")
     }
 
-    // Create enhanced system prompt
     const systemPrompt = `Ești un asistent AI specializat în analiza documentelor. 
 
 INSTRUCȚIUNI IMPORTANTE:
@@ -62,16 +62,21 @@ Format pentru citare: "Conform fișierului [nume_fișier], ..."
 ${context}`
 
     const result = streamText({
-      model: google("gemini-2.0-flash-exp"),
+      model: google(AI_MODELS.GEMINI.CHAT),
       system: systemPrompt,
-      messages,
+      messages: messages.map((msg: any) => ({
+        role: msg.role,
+        content: msg.content,
+      })),
       onFinish: async (result) => {
         // Save chat messages to database
         await saveChatMessage({
+          sessionId,
           role: "user",
           content: lastMessage.content,
         })
         await saveChatMessage({
+          sessionId,
           role: "assistant",
           content: result.text,
         })

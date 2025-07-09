@@ -1,9 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getDocumentById } from "@/lib/database"
 
-export async function GET(request: NextRequest, { params }: { params: { documentId: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ documentId: string }> }) {
   try {
-    const document = getDocumentById(params.documentId)
+    const { documentId } = await params
+    const document = getDocumentById(documentId)
 
     if (!document) {
       return NextResponse.json({ error: "Document not found" }, { status: 404 })

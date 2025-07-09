@@ -1,12 +1,12 @@
+import { AI_MODELS, API_CONFIG } from "./constants"
+
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434"
-const EMBEDDING_MODEL = process.env.OLLAMA_EMBEDDING_MODEL || "nomic-embed-text"
-const MAX_RETRIES = 3
-const RETRY_DELAY = 1000 // 1 second
+const EMBEDDING_MODEL = process.env.OLLAMA_EMBEDDING_MODEL || AI_MODELS.OLLAMA.EMBEDDING
 
 export async function createEmbedding(text: string): Promise<number[]> {
   let retries = 0
 
-  while (retries < MAX_RETRIES) {
+  while (retries < API_CONFIG.MAX_RETRIES) {
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/embeddings`, {
         method: "POST",
@@ -32,13 +32,13 @@ export async function createEmbedding(text: string): Promise<number[]> {
       return data.embedding
     } catch (error) {
       retries++
-      if (retries >= MAX_RETRIES) {
+      if (retries >= API_CONFIG.MAX_RETRIES) {
         console.error("Max retries reached for embedding creation:", error)
-        throw new Error(`Failed to create embedding after ${MAX_RETRIES} retries: ${error}`)
+        throw new Error(`Failed to create embedding after ${API_CONFIG.MAX_RETRIES} retries: ${error}`)
       }
 
-      const delay = RETRY_DELAY * Math.pow(2, retries - 1)
-      console.log(`Error creating embedding, retrying in ${delay}ms... (attempt ${retries}/${MAX_RETRIES})`)
+      const delay = API_CONFIG.RETRY_DELAY * Math.pow(2, retries - 1)
+      console.log(`Error creating embedding, retrying in ${delay}ms... (attempt ${retries}/${API_CONFIG.MAX_RETRIES})`)
       await new Promise((resolve) => setTimeout(resolve, delay))
     }
   }

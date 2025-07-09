@@ -6,7 +6,7 @@ import type { ProcessedChunk } from "./document-processor"
 const dbPath = join(process.cwd(), "data", "rag.db")
 const db = new Database(dbPath)
 
-// Initialize database tables with enhanced metadata
+// Initialize database tables with chat sessions
 db.exec(`
   CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
@@ -33,16 +33,27 @@ db.exec(`
     FOREIGN KEY (document_id) REFERENCES documents (id)
   );
 
+  CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES chat_sessions (id) ON DELETE CASCADE
   );
 
   CREATE INDEX IF NOT EXISTS idx_embeddings_document_id ON embeddings(document_id);
   CREATE INDEX IF NOT EXISTS idx_embeddings_file_name ON embeddings(file_name);
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
   CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at ON chat_messages(created_at);
+  CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at);
   CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 `)
 
@@ -58,13 +69,105 @@ export interface Document {
   createdAt?: string
 }
 
+export interface ChatSession {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ChatMessage {
   id?: number
+  sessionId: string
   role: "user" | "assistant"
   content: string
   createdAt?: string
 }
 
+// Chat Sessions
+export function createChatSession(title = "New Chat"): ChatSession {
+  const id = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  const stmt = db.prepare(`
+    INSERT INTO chat_sessions (id, title)
+    VALUES (?, ?)
+  `)
+
+  stmt.run(id, title)
+
+  return {
+    id,
+    title,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+export function getAllChatSessions(): ChatSession[] {
+  const stmt = db.prepare(`
+    SELECT id, title, created_at as createdAt, updated_at as updatedAt
+    FROM chat_sessions
+    ORDER BY updated_at DESC
+  `)
+
+  return stmt.all() as ChatSession[]
+}
+
+export function getChatSession(id: string): ChatSession | null {
+  const stmt = db.prepare(`
+    SELECT id, title, created_at as "createdAt", updated_at as "updatedAt"
+    FROM chat_sessions
+    WHERE id = ?
+  `)
+
+  const result = stmt.get(id) as ChatSession | undefined
+  return result || null
+}
+
+export function updateChatSessionTitle(id: string, title: string): void {
+  const stmt = db.prepare(`
+    UPDATE chat_sessions 
+    SET title = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `)
+
+  stmt.run(title, id)
+}
+
+export function deleteChatSession(id: string): void {
+  const stmt = db.prepare(`DELETE FROM chat_sessions WHERE id = ?`)
+  stmt.run(id)
+}
+
+// Chat Messages
+export function saveChatMessage(message: Omit<ChatMessage, "id" | "createdAt">): void {
+  const stmt = db.prepare(`
+    INSERT INTO chat_messages (session_id, role, content)
+    VALUES (?, ?, ?)
+  `)
+
+  stmt.run(message.sessionId, message.role, message.content)
+
+  // Update session timestamp
+  const updateStmt = db.prepare(`
+    UPDATE chat_sessions 
+    SET updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `)
+  updateStmt.run(message.sessionId)
+}
+
+export function getChatMessages(sessionId: string): ChatMessage[] {
+  const stmt = db.prepare(
+    `SELECT id, session_id as sessionId, role, content, created_at as createdAt
+    FROM chat_messages
+    WHERE session_id = ?
+    ORDER BY created_at ASC`
+  )
+
+  return stmt.all(sessionId) as unknown as ChatMessage[]
+}
+
+// Documents
 export async function saveDocument(doc: Omit<Document, "createdAt">): Promise<Document> {
   const stmt = db.prepare(`
     INSERT INTO documents (id, name, type, size, path, chunks, status, progress)
@@ -110,15 +213,12 @@ export async function saveEmbeddings(documentId: string, chunks: ProcessedChunk[
       processedChunks++
       progress = Math.round((processedChunks / chunks.length) * 100)
 
-      // Update progress
       await updateDocumentProgress(documentId, progress)
       console.log(`Progress: ${progress}% (${processedChunks}/${chunks.length})`)
     } catch (error) {
       console.error(`Failed to create embedding for chunk ${i}:`, error)
-      // Continue with next chunk but mark as failed if too many errors
       const errorRate = (i + 1 - processedChunks) / (i + 1)
       if (errorRate > 0.5) {
-        // If more than 50% failed
         console.error(`Too many embedding failures (${Math.round(errorRate * 100)}%), marking document as failed`)
         await updateDocumentProgress(documentId, progress, "failed")
         throw error
@@ -126,12 +226,21 @@ export async function saveEmbeddings(documentId: string, chunks: ProcessedChunk[
     }
   }
 
-  // Mark as completed
   console.log(`Successfully created embeddings for document ${documentId}`)
   await updateDocumentProgress(documentId, 100, "completed")
 }
 
-export async function searchSimilarChunks(query: string, limit = 5) {
+interface EmbeddingRow {
+  document_id: string
+  chunk_index: number
+  content: string
+  embedding: Buffer
+  file_name: string
+  file_type: string
+  total_chunks: number
+}
+
+export async function searchSimilarChunks(query: string, limit = 10) {
   try {
     console.log(`Searching for similar chunks to query: "${query.substring(0, 100)}..."`)
     const queryEmbedding = await createEmbedding(query)
@@ -148,7 +257,7 @@ export async function searchSimilarChunks(query: string, limit = 5) {
       FROM embeddings
     `)
 
-    const rows = stmt.all()
+    const rows = stmt.all() as EmbeddingRow[]
     console.log(`Found ${rows.length} chunks in database`)
 
     const similarities: Array<{
@@ -189,26 +298,6 @@ export async function searchSimilarChunks(query: string, limit = 5) {
   }
 }
 
-export async function saveChatMessage(message: Omit<ChatMessage, "id" | "createdAt">): Promise<void> {
-  const stmt = db.prepare(`
-    INSERT INTO chat_messages (role, content)
-    VALUES (?, ?)
-  `)
-
-  stmt.run(message.role, message.content)
-}
-
-export function getChatHistory(limit = 50): ChatMessage[] {
-  const stmt = db.prepare(`
-    SELECT id, role, content, created_at as createdAt
-    FROM chat_messages
-    ORDER BY created_at DESC
-    LIMIT ?
-  `)
-
-  return stmt.all(limit).reverse()
-}
-
 function cosineSimilarity(a: number[], b: number[]): number {
   const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0)
   const magnitudeA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0))
@@ -234,15 +323,64 @@ export function getAllDocuments(): Document[] {
     ORDER BY created_at DESC
   `)
 
-  return stmt.all()
+  return stmt.all() as Document[]
 }
 
 export function getDocumentById(id: string): Document | null {
-  const stmt = db.prepare(`
+  const stmt = db.prepare<[string], Document>(`
     SELECT id, name, type, size, path, chunks, status, progress, created_at as createdAt
     FROM documents
     WHERE id = ?
   `)
 
-  return stmt.get(id) || null
+  const result = stmt.get(id) as Document | undefined
+  return result || null
+}
+
+export async function deleteDocument(documentId: string): Promise<void> {
+  // Delete embeddings first (foreign key constraint)
+  const deleteEmbeddingsStmt = db.prepare(`DELETE FROM embeddings WHERE document_id = ?`)
+  deleteEmbeddingsStmt.run(documentId)
+
+  // Delete document
+  const deleteDocumentStmt = db.prepare(`DELETE FROM documents WHERE id = ?`)
+  deleteDocumentStmt.run(documentId)
+
+  console.log(`Document ${documentId} and its embeddings deleted successfully`)
+}
+
+export function createDefaultChatSession(): ChatSession {
+  // Generate a unique ID with timestamp
+  const timestamp = new Date().toISOString().slice(2, 10).replace(/-/g, "") // YYMMDD format
+  const randomSuffix = Math.floor(Math.random() * 100)
+  const id = `default_chat_${timestamp}_${randomSuffix}`
+  const title = `Chat Principal_${randomSuffix}`
+
+  // Check if a default session already exists
+  const existingStmt = db.prepare(`
+    SELECT id, title, created_at as createdAt, updated_at as updatedAt
+    FROM chat_sessions
+    WHERE title LIKE 'Chat Principal%'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `)
+
+  const existing = existingStmt.get() as ChatSession | undefined
+  if (existing) {
+    return existing
+  }
+
+  const stmt = db.prepare(`
+    INSERT INTO chat_sessions (id, title)
+    VALUES (?, ?)
+  `)
+
+  stmt.run(id, title)
+
+  return {
+    id,
+    title,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
 }

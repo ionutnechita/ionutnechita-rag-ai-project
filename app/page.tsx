@@ -1,17 +1,31 @@
 "use client"
 
+import type React from "react"
+
 import { useState, useRef, useEffect } from "react"
-import { useChat } from "ai/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
-import { Send, FileText, MessageCircle, RefreshCw, Bot, Sparkles } from "lucide-react"
-import { DocumentUpload } from "@/components/document-upload"
+import { Send, Plus, FileText, Upload, Bot } from "lucide-react"
 import { ChatMessage } from "@/components/chat-message"
-import { DocumentList } from "@/components/document-list"
 import { OllamaStatus } from "@/components/ollama-status"
+import { GeminiStatus } from "@/components/gemini-status"
+import { DocumentUploadDialog } from "@/components/document-upload-dialog"
+import { DocumentSidebarList } from "@/components/document-sidebar-list"
+import { ChatSessionItem } from "@/components/chat-session-item"
+
+interface ChatSession {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+}
+
+interface Message {
+  id: string
+  role: "user" | "assistant"
+  content: string
+}
 
 interface Document {
   id: string
@@ -25,15 +39,27 @@ interface Document {
 }
 
 export default function RAGChatbot() {
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([])
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState("")
+  const [isLoading, setIsLoading] = useState(false)
   const [documents, setDocuments] = useState<Document[]>([])
-  const [isUploading, setIsUploading] = useState(false)
-  const [isLoadingDocuments, setIsLoadingDocuments] = useState(true)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [showUploadDialog, setShowUploadDialog] = useState(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
-    api: "/api/chat",
-  })
+  // Load chat sessions and documents on mount
+  useEffect(() => {
+    loadChatSessions()
+    loadDocuments()
+  }, [])
+
+  // Load messages when session changes
+  useEffect(() => {
+    if (currentSessionId) {
+      loadMessages(currentSessionId)
+    }
+  }, [currentSessionId])
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -45,35 +71,71 @@ export default function RAGChatbot() {
     }
   }, [messages])
 
-  // Load existing documents on mount
-  useEffect(() => {
-    loadExistingDocuments()
-  }, [])
+  const loadChatSessions = async () => {
+    try {
+      const response = await fetch("/api/chat-sessions")
+      if (response.ok) {
+        const data = await response.json()
+        setChatSessions(data.sessions)
 
-  // Set up progress streaming
-  useEffect(() => {
-    if (documents.some((doc) => doc.status === "processing")) {
-      const eventSource = new EventSource("/api/progress/stream")
-
-      eventSource.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.type === "update" || data.type === "initial") {
-          setDocuments(data.documents)
+        // If no current session, look for default session or create one
+        if (!currentSessionId) {
+          const defaultSession = data.sessions.find((s: ChatSession) => s.title.startsWith("Chat Principal"))
+          if (defaultSession) {
+            setCurrentSessionId(defaultSession.id)
+          } else {
+            // Create default session if it doesn't exist
+            createDefaultSession()
+          }
         }
       }
-
-      eventSource.onerror = (error) => {
-        console.error("EventSource failed:", error)
-        eventSource.close()
-      }
-
-      return () => {
-        eventSource.close()
-      }
+    } catch (error) {
+      console.error("Failed to load chat sessions:", error)
     }
-  }, [documents])
+  }
 
-  const loadExistingDocuments = async () => {
+  const createDefaultSession = async () => {
+    try {
+      // Generate unique title with timestamp
+      const timestamp = new Date().toISOString().slice(2, 10).replace(/-/g, "")
+      const randomSuffix = Math.floor(Math.random() * 100)
+      const title = `Chat Principal_${randomSuffix}`
+
+      const response = await fetch("/api/chat-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setChatSessions((prev) => [data.session, ...prev])
+        setCurrentSessionId(data.session.id)
+      }
+    } catch (error) {
+      console.error("Failed to create default session:", error)
+    }
+  }
+
+  const loadMessages = async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/chat-sessions/${sessionId}/messages`)
+      if (response.ok) {
+        const data = await response.json()
+        setMessages(
+          data.messages.map((msg: any) => ({
+            id: msg.id?.toString() || `msg_${Date.now()}_${Math.random()}`,
+            role: msg.role,
+            content: msg.content,
+          })),
+        )
+      }
+    } catch (error) {
+      console.error("Failed to load messages:", error)
+    }
+  }
+
+  const loadDocuments = async () => {
     try {
       const response = await fetch("/api/documents")
       if (response.ok) {
@@ -82,185 +144,339 @@ export default function RAGChatbot() {
       }
     } catch (error) {
       console.error("Failed to load documents:", error)
-    } finally {
-      setIsLoadingDocuments(false)
     }
   }
 
-  const handleFileUpload = async (files: FileList) => {
-    if (!files.length) return
-
-    setIsUploading(true)
-    const formData = new FormData()
-
-    Array.from(files).forEach((file) => {
-      formData.append("files", file)
-    })
-
+  const createNewChat = async () => {
     try {
-      const response = await fetch("/api/upload", {
+      const response = await fetch("/api/chat-sessions", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "New Chat" }),
       })
 
       if (response.ok) {
-        const result = await response.json()
-        setDocuments((prev) => [...prev, ...result.documents])
+        const data = await response.json()
+        setChatSessions((prev) => [data.session, ...prev])
+        setCurrentSessionId(data.session.id)
+        setMessages([])
       }
     } catch (error) {
-      console.error("Upload failed:", error)
-    } finally {
-      setIsUploading(false)
+      console.error("Failed to create new chat:", error)
     }
   }
 
-  const refreshDocuments = () => {
-    setIsLoadingDocuments(true)
-    loadExistingDocuments()
+  const deleteChat = async (sessionId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+
+    // Don't allow deleting the default session
+    const session = chatSessions.find((s) => s.id === sessionId)
+    if (session?.title.startsWith("Chat Principal")) {
+      return
+    }
+
+    try {
+      const response = await fetch(`/api/chat-sessions/${sessionId}`, {
+        method: "DELETE",
+      })
+
+      if (response.ok) {
+        setChatSessions((prev) => prev.filter((s) => s.id !== sessionId))
+        if (currentSessionId === sessionId) {
+          const remaining = chatSessions.filter((s) => s.id !== sessionId)
+          const defaultSession = remaining.find((s) => s.title.startsWith("Chat Principal"))
+          setCurrentSessionId(defaultSession ? defaultSession.id : remaining.length > 0 ? remaining[0].id : null)
+          setMessages([])
+        }
+      }
+    } catch (error) {
+      console.error("Failed to delete chat:", error)
+    }
   }
 
-  const completedDocuments = documents.filter((d) => d.status === "completed").length
-  const totalDocuments = documents.length
+  const renameChat = async (sessionId: string, newTitle: string) => {
+    try {
+      const response = await fetch(`/api/chat-sessions/${sessionId}/rename`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      })
+
+      if (response.ok) {
+        setChatSessions((prev) =>
+          prev.map((session) => (session.id === sessionId ? { ...session, title: newTitle } : session)),
+        )
+      }
+    } catch (error) {
+      console.error("Failed to rename chat:", error)
+    }
+  }
+
+  const deleteDocument = async (documentId: string) => {
+    try {
+      const response = await fetch(`/api/documents/${documentId}`, {
+        method: "DELETE",
+      })
+
+      if (response.ok) {
+        setDocuments((prev) => prev.filter((doc) => doc.id !== documentId))
+      }
+    } catch (error) {
+      console.error("Failed to delete document:", error)
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!input.trim() || isLoading || !currentSessionId) return
+
+    const userMessage: Message = {
+      id: `msg_${Date.now()}_${Math.random()}`,
+      role: "user",
+      content: input.trim(),
+    }
+
+    // Add user message immediately
+    setMessages((prev) => [...prev, userMessage])
+    setInput("")
+    setIsLoading(true)
+
+    // Create assistant message placeholder
+    const assistantMessageId = `msg_${Date.now() + 1}_${Math.random()}`
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "",
+    }
+
+    setMessages((prev) => [...prev, assistantMessage])
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: currentSessionId,
+          messages: [...messages, userMessage].map((msg) => ({
+            role: msg.role,
+            content: msg.content,
+          })),
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+      let assistantContent = ""
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value, { stream: true })
+          const lines = chunk.split("\n")
+
+          for (const line of lines) {
+            if (line.startsWith("0:")) {
+              try {
+                const jsonStr = line.slice(2)
+                const data = JSON.parse(jsonStr)
+
+                if (data.content) {
+                  assistantContent += data.content
+
+                  // Update the assistant message in real-time
+                  setMessages((prev) =>
+                    prev.map((msg) => (msg.id === assistantMessageId ? { ...msg, content: assistantContent } : msg)),
+                  )
+                }
+              } catch (parseError) {
+                console.error("Failed to parse streaming data:", parseError)
+              }
+            }
+          }
+        }
+      }
+
+      // Reload messages to get the saved versions with proper IDs
+      setTimeout(() => {
+        loadMessages(currentSessionId)
+      }, 500)
+    } catch (error) {
+      console.error("Chat error:", error)
+
+      // Remove the failed assistant message
+      setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessageId))
+
+      // Add error message
+      const errorMessage: Message = {
+        id: `error_${Date.now()}`,
+        role: "assistant",
+        content: "Ne pare rău, a apărut o eroare. Te rugăm să încerci din nou.",
+      }
+      setMessages((prev) => [...prev, errorMessage])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const completedDocuments = documents.filter((d) => d.status === "completed")
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
-      {/* Header */}
-      <div className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg">
-                <Bot className="h-6 w-6 text-white" />
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <div className="w-80 bg-gray-900 text-white flex flex-col">
+        {/* New Chat Button */}
+        <div className="p-3 flex-shrink-0">
+          <Button onClick={createNewChat} className="w-full bg-blue-600 hover:bg-blue-700 text-white">
+            <Plus className="h-4 w-4 mr-2" />
+            New Chat
+          </Button>
+        </div>
+
+        {/* Chat History */}
+        <div className="px-3 flex-shrink-0">
+          <div>
+            <h3 className="text-xs font-semibold text-gray-300 mb-2">Chat History</h3>
+            <ScrollArea className="max-h-32">
+              <div className="space-y-1">
+                {chatSessions.map((session) => (
+                  <ChatSessionItem
+                    key={session.id}
+                    session={session}
+                    isActive={currentSessionId === session.id}
+                    onSelect={() => setCurrentSessionId(session.id)}
+                    onDelete={(e) => deleteChat(session.id, e)}
+                    onRename={(newTitle) => renameChat(session.id, newTitle)}
+                  />
+                ))}
               </div>
-              <div>
-                <h1 className="text-xl font-bold text-gray-900">RAG Chatbot</h1>
-                <p className="text-sm text-gray-500">Powered by Ollama + Gemini AI</p>
-              </div>
-            </div>
-            <div className="ml-auto flex items-center gap-4 text-sm text-gray-600">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4" />
-                <span>
-                  {completedDocuments}/{totalDocuments} documente procesate
-                </span>
-              </div>
-            </div>
+            </ScrollArea>
           </div>
         </div>
-      </div>
 
-      <div className="max-w-7xl mx-auto p-4 grid grid-cols-1 xl:grid-cols-4 gap-6">
-        {/* Document Upload Section */}
-        <div className="xl:col-span-1 space-y-4">
-          {/* Ollama Status */}
-          <OllamaStatus />
-
-          {/* Documents Card */}
-          <Card className="shadow-lg border-0 bg-white/70 backdrop-blur-sm">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <FileText className="h-5 w-5 text-blue-600" />
-                  Documente
-                </CardTitle>
-                <Button variant="outline" size="sm" onClick={refreshDocuments} disabled={isLoadingDocuments}>
-                  <RefreshCw className={`h-4 w-4 ${isLoadingDocuments ? "animate-spin" : ""}`} />
-                </Button>
-              </div>
-              <Separator />
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <DocumentUpload onUpload={handleFileUpload} isUploading={isUploading} />
-              {isLoadingDocuments ? (
-                <div className="text-center text-muted-foreground py-8">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto mb-2"></div>
-                  <p className="text-sm">Se încarcă documentele...</p>
-                </div>
-              ) : (
-                <DocumentList documents={documents} />
-              )}
-            </CardContent>
-          </Card>
+        {/* Documents List - Expandable */}
+        <div className="flex-1 flex flex-col min-h-0 px-3 pt-4 border-t border-gray-700">
+          <DocumentSidebarList documents={documents} onRefresh={loadDocuments} onDelete={deleteDocument} />
         </div>
 
-        {/* Chat Section */}
-        <div className="xl:col-span-3">
-          <Card className="shadow-lg border-0 bg-white/70 backdrop-blur-sm h-[calc(100vh-140px)]">
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <MessageCircle className="h-5 w-5 text-blue-600" />
-                Chat Inteligent
-              </CardTitle>
-              <Separator />
-            </CardHeader>
-            <CardContent className="flex flex-col h-[calc(100%-80px)] p-0">
-              {/* Messages Area */}
-              <ScrollArea ref={scrollAreaRef} className="flex-1 px-6">
-                <div className="space-y-4 py-4">
-                  {messages.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-12 text-center">
-                      <div className="p-4 bg-gradient-to-br from-blue-100 to-indigo-100 rounded-full mb-4">
-                        <Bot className="h-8 w-8 text-blue-600" />
-                      </div>
-                      <h3 className="text-lg font-semibold text-gray-900 mb-2">Bun venit la RAG Chatbot!</h3>
-                      <p className="text-gray-600 mb-4 max-w-md">
-                        Încarcă documente și începe să pui întrebări despre conținutul lor. Folosesc Ollama local pentru
-                        embeddings și Gemini AI pentru răspunsuri.
-                      </p>
-                      <div className="flex items-center gap-2 text-sm text-gray-500 bg-gray-50 px-3 py-2 rounded-full">
-                        <Sparkles className="h-4 w-4" />
-                        <span>
-                          {completedDocuments} din {totalDocuments} documente sunt gata pentru căutare
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {messages.map((message) => (
-                    <ChatMessage key={message.id} message={message} />
-                  ))}
-                  {isLoading && (
-                    <div className="flex items-center gap-3 text-gray-600 bg-gray-50 rounded-lg p-4">
-                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
-                      <span className="text-sm font-medium">Gemini AI analizează documentele...</span>
-                    </div>
-                  )}
-                </div>
-              </ScrollArea>
+        {/* Bottom Section - Fixed */}
+        <div className="p-3 border-t border-gray-700 space-y-3 flex-shrink-0">
+          {/* AI Services Status */}
+          <div className="space-y-2">
+            <OllamaStatus />
+            <GeminiStatus />
+          </div>
 
-              {/* Input Area */}
-              <div className="border-t bg-white/50 p-4">
-                <form onSubmit={handleSubmit} className="flex gap-3">
-                  <div className="flex-1 relative">
-                    <Input
-                      value={input}
-                      onChange={handleInputChange}
-                      placeholder="Pune o întrebare despre documentele încărcate..."
-                      disabled={isLoading}
-                      className="pr-12 h-12 text-base border-gray-200 focus:border-blue-500 focus:ring-blue-500"
-                    />
-                    <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-xs text-gray-400">
-                      {input.length}/500
+          {/* Upload Document Button */}
+          <Button
+            onClick={() => setShowUploadDialog(true)}
+            className="w-full bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-medium shadow-lg border-0 transition-all duration-200 hover:shadow-xl"
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Upload Document
+          </Button>
+        </div>
+      </div>
+
+      {/* Main Chat Area */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <div className="bg-white border-b px-6 py-4 flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-gray-900">Chat Inteligent</h1>
+          <div className="flex items-center gap-2 text-sm text-gray-600">
+            <FileText className="h-4 w-4" />
+            <span>{completedDocuments.length} documente active</span>
+          </div>
+        </div>
+
+        {/* Messages Area */}
+        <ScrollArea ref={scrollAreaRef} className="flex-1 bg-white">
+          <div className="max-w-4xl mx-auto px-6 py-8">
+            {messages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <div className="p-4 bg-gray-100 rounded-full mb-6">
+                  <Bot className="h-12 w-12 text-gray-600" />
+                </div>
+                <h2 className="text-2xl font-semibold text-gray-900 mb-4">Bună! Sunt asistentul tău AI</h2>
+                <p className="text-gray-600 mb-6 max-w-md">
+                  Pot să răspund la întrebări bazate pe documentele tale încărcate.
+                </p>
+
+                {completedDocuments.length > 0 && (
+                  <div className="bg-blue-50 rounded-lg p-4 max-w-2xl">
+                    <p className="text-sm text-blue-800 mb-3">
+                      Am identificat {completedDocuments.length} documente disponibile pentru analiză:
+                    </p>
+                    <div className="text-xs text-blue-700 space-y-1">
+                      <p className="font-medium">Documente disponibile:</p>
+                      {completedDocuments.slice(0, 3).map((doc) => (
+                        <div key={doc.id} className="bg-white/50 px-2 py-1 rounded">
+                          {doc.name}
+                        </div>
+                      ))}
+                      {completedDocuments.length > 3 && (
+                        <div className="text-blue-600">+{completedDocuments.length - 3} documente</div>
+                      )}
                     </div>
                   </div>
-                  <Button
-                    type="submit"
-                    disabled={isLoading || !input.trim() || completedDocuments === 0}
-                    className="h-12 px-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                </form>
-                {completedDocuments === 0 && totalDocuments > 0 && (
-                  <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
-                    <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse"></span>
-                    Așteaptă ca documentele să fie procesate pentru a putea pune întrebări
-                  </p>
                 )}
               </div>
-            </CardContent>
-          </Card>
+            ) : (
+              <div className="space-y-6">
+                {messages.map((message) => (
+                  <ChatMessage key={message.id} message={message} />
+                ))}
+                {isLoading && (
+                  <div className="flex items-center gap-3 text-gray-600">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                    <span className="text-sm">Se gândește...</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+
+        {/* Input Area */}
+        <div className="bg-white border-t px-6 py-4">
+          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
+            <div className="flex gap-3">
+              <div className="flex-1 relative">
+                <Input
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Pune o întrebare despre documentele tale..."
+                  disabled={isLoading || !currentSessionId}
+                  className="pr-12 h-12 text-base border-gray-300 focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              <Button
+                type="submit"
+                disabled={isLoading || !input.trim() || !currentSessionId}
+                className="h-12 px-6 bg-blue-600 hover:bg-blue-700"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2 text-center">Scrie un mesaj pentru a începe conversația</p>
+          </form>
         </div>
       </div>
+
+      {/* Upload Dialog */}
+      <DocumentUploadDialog
+        open={showUploadDialog}
+        onOpenChange={setShowUploadDialog}
+        onUploadComplete={() => {
+          loadDocuments()
+          setShowUploadDialog(false)
+        }}
+      />
     </div>
   )
 }
